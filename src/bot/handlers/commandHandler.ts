@@ -1,15 +1,15 @@
-import { Interaction } from 'discord.js';
-import { handleHelp } from './help.js';
-import { handleRegister } from './register.js';
-import { handleProfile } from './profile.js';
-import { handleFine } from './fine.js';
-import { handleMeeting } from './meeting.js';
-import { handleRadio } from './radio.js';
-import { handlePoll } from './poll.js';
-import { handleConfig } from './config.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
+const { handleHelp } = require('./help');
+const { handleRegister } = require('./register');
+const { handleProfile } = require('./profile');
+const { handleFine } = require('./fine');
+const { handleMeeting } = require('./meeting');
+const { handleRadio } = require('./radio');
+const { handlePoll } = require('./poll');
+const { handleConfig } = require('./config');
+const logger = require('../lib/logger');
 
-export async function handleCommands(interaction: Interaction) {
+async function handleCommands(interaction: ChatInputCommandInteraction): Promise<void> {
   if (!interaction.isChatInputCommand()) return;
 
   try {
@@ -19,7 +19,7 @@ export async function handleCommands(interaction: Interaction) {
       case 'ping':
         await interaction.reply({
           content: `🏓 Pong! Latency: ${interaction.client.ws.ping}ms`,
-          flags: 64
+          ephemeral: true
         });
         break;
 
@@ -56,29 +56,28 @@ export async function handleCommands(interaction: Interaction) {
         break;
 
       default:
-        await interaction.reply({ 
-          content: 'Unknown command. Use `/help` to see available commands.',
-          flags: 64
+        await interaction.reply({
+          content: 'Unknown command.',
+          ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error handling command:', error);
-    
     try {
-      const response = {
-        content: 'An error occurred while processing your command. Please try again later.',
-        flags: 64
-      };
-
       if (interaction.deferred) {
-        await interaction.editReply(response);
-      } else if (interaction.replied) {
-        await interaction.followUp(response);
+        await interaction.editReply({
+          content: 'An error occurred while processing your command.',
+        });
       } else {
-        await interaction.reply(response);
+        await interaction.reply({
+          content: 'An error occurred while processing your command.',
+          ephemeral: true
+        });
       }
-    } catch (followUpError) {
-      logger.error('Error sending error response:', followUpError);
+    } catch (replyError) {
+      logger.error('Error sending error response:', replyError);
     }
   }
 }
+
+module.exports = { handleCommands };

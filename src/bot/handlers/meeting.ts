@@ -1,10 +1,45 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
-import { parseISO } from 'date-fns';
-import { getTimezoneOffset } from 'date-fns-tz';
+import type { ChatInputCommandInteraction, Message } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
+const { parseISO, addMinutes } = require('date-fns');
+const { getTimezoneOffset } = require('date-fns-tz');
 
-export async function handleMeeting(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  id: string;
+  faction_id: string;
+  discord_user_id: string;
+  role: string;
+}
+
+interface Faction {
+  id: string;
+  name: string;
+  timezone: string;
+  meeting_channel_id?: string;
+}
+
+interface Meeting {
+  id: string;
+  faction_id: string;
+  title: string;
+  description?: string;
+  scheduled_time: string;
+  created_by_user_id: string;
+  message_id?: string;
+  channel_id?: string;
+}
+
+interface MeetingAttendance {
+  id: string;
+  meeting_id: string;
+  member_id: string;
+  status: 'PRESENT' | 'LATE' | 'ABSENT';
+}
+
+type ValidRole = 'LEADER' | 'OFFICER';
+
+async function handleMeeting(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
   try {
@@ -31,7 +66,7 @@ export async function handleMeeting(interaction: ChatInputCommandInteraction) {
       .eq('discord_user_id', interaction.user.id)
       .single();
 
-    if (!member || !['LEADER', 'OFFICER'].includes(member.role)) {
+    if (!member || !['LEADER', 'OFFICER'].includes(member.role as ValidRole)) {
       await interaction.reply({
         content: 'Only leaders and officers can manage meetings.',
         ephemeral: true
@@ -49,22 +84,34 @@ export async function handleMeeting(interaction: ChatInputCommandInteraction) {
         try {
           const parsedTime = parseISO(timeStr);
           const offset = getTimezoneOffset(faction.timezone);
-          scheduledTime = new Date(parsedTime.getTime() - offset);
-
-          if (scheduledTime < new Date()) {
-            await interaction.reply({
-              content: 'Meeting time must be in the future.',
-              ephemeral: true
-            });
-            return;
-          }
+          scheduledTime = addMinutes(parsedTime, -offset);
         } catch (error) {
           await interaction.reply({
-            content: 'Invalid time format. Please use format: "2025-04-01 15:00"',
+            content: 'Invalid time format. Please use ISO 8601 format (YYYY-MM-DDTHH:mm:ss).',
             ephemeral: true
           });
           return;
         }
+
+        // Validate meeting channel
+        if (!faction.meeting_channel_id) {
+          await interaction.reply({
+            content: 'No meeting channel configured. Use `/config channels` to set one up.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setColor('#0099ff')
+          .setTitle('📅 ' + title)
+          .setDescription(description || 'No description provided.')
+          .addFields(
+            { name: 'Time', value: `<t:${Math.floor(scheduledTime.getTime() / 1000)}:F>`, inline: true },
+            { name: 'Scheduled by', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setFooter({ text: 'Meeting ID will be provided after confirmation' })
+          .setTimestamp();
 
         // Create meeting in database
         const { data: meeting, error } = await supabase
@@ -73,173 +120,185 @@ export async function handleMeeting(interaction: ChatInputCommandInteraction) {
             faction_id: faction.id,
             title,
             description,
-            scheduled_for: scheduledTime.toISOString(),
-            created_by_user_id: interaction.user.id,
-            notify_roles: faction.admin_role_id ? [faction.admin_role_id] : []
+            scheduled_time: scheduledTime.toISOString(),
+            created_by_user_id: interaction.user.id
           })
           .select()
           .single();
 
-        if (error) throw error;
-
-        const embed = new EmbedBuilder()
-          .setColor('#0099ff')
-          .setTitle('📅 Meeting Scheduled')
-          .addFields(
-            { name: '📝 Title', value: title },
-            { 
-              name: '🕒 Time', 
-              value: `<t:${Math.floor(scheduledTime.getTime() / 1000)}:F>\n(<t:${Math.floor(scheduledTime.getTime() / 1000)}:R>)` 
-            },
-            { name: '📋 Description', value: description || 'No description provided' },
-            { name: '👤 Organized by', value: interaction.user.tag }
-          )
-          .setFooter({ text: 'React with ✅ to attend, ❌ to decline, or ❓ if unsure' })
-          .setTimestamp();
-
-        const message = await interaction.reply({
-          content: faction.admin_role_id ? `<@&${faction.admin_role_id}>` : undefined,
-          embeds: [embed],
-          fetchReply: true
-        });
-
-        // Add attendance reaction options
-        await message.react('✅');
-        await message.react('❌');
-        await message.react('❓');
-
-        // Set up collector for attendance
-        const collector = message.createReactionCollector({ 
-          time: scheduledTime.getTime() - Date.now() 
-        });
-
-        collector.on('collect', async (reaction, user) => {
-          if (user.bot) return;
-
-          const statusMap: { [key: string]: string } = {
-            '✅': 'ATTENDING',
-            '❌': 'DECLINED',
-            '❓': 'MAYBE'
-          };
-
-          const status = statusMap[reaction.emoji.name!];
-          if (!status) return;
-
-          try {
-            // Record attendance in database
-            await supabase
-              .from('meeting_attendance')
-              .upsert({
-                meeting_id: meeting.id,
-                discord_user_id: user.id,
-                status
-              });
-          } catch (error) {
-            logger.error('Error recording meeting attendance:', error);
-          }
-        });
-
-        // Schedule meeting notification
-        const notificationTime = new Date(scheduledTime.getTime() - 15 * 60000); // 15 minutes before
-        if (notificationTime > new Date() && faction.meeting_channel_id) {
-          setTimeout(async () => {
-            try {
-              const channel = interaction.guild?.channels.cache.get(faction.meeting_channel_id!);
-              if (channel?.isTextBased()) {
-                const { data: attendees } = await supabase
-                  .from('meeting_attendance')
-                  .select('discord_user_id')
-                  .eq('meeting_id', meeting.id)
-                  .eq('status', 'ATTENDING');
-
-                const reminderEmbed = new EmbedBuilder()
-                  .setColor('#ffaa00')
-                  .setTitle('⏰ Meeting Reminder')
-                  .setDescription(`Meeting "${title}" starts in 15 minutes!`)
-                  .addFields({
-                    name: 'Confirmed Attendees',
-                    value: attendees?.length 
-                      ? attendees.map(a => `<@${a.discord_user_id}>`).join('\n')
-                      : 'No confirmed attendees'
-                  });
-
-                await channel.send({
-                  content: faction.admin_role_id ? `<@&${faction.admin_role_id}>` : undefined,
-                  embeds: [reminderEmbed]
-                });
-              }
-            } catch (error) {
-              logger.error('Error sending meeting reminder:', error);
-            }
-          }, notificationTime.getTime() - Date.now());
+        if (error) {
+          logger.error('Error creating meeting:', error);
+          await interaction.reply({
+            content: 'An error occurred while scheduling the meeting.',
+            ephemeral: true
+          });
+          return;
         }
+
+        // Send meeting announcement
+        const channel = await interaction.guild?.channels.fetch(faction.meeting_channel_id);
+        if (!channel?.isTextBased()) {
+          await interaction.reply({
+            content: 'Could not find meeting channel or it is not a text channel.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        const message = await channel.send({
+          content: '@everyone New meeting scheduled!',
+          embeds: [embed.setFooter({ text: `Meeting ID: ${meeting.id}` })]
+        }) as Message;
+
+        // Update meeting with message info
+        await supabase
+          .from('meetings')
+          .update({
+            message_id: message.id,
+            channel_id: channel.id
+          })
+          .eq('id', meeting.id);
+
+        await interaction.reply({
+          content: `Meeting scheduled! View it in <#${channel.id}>`,
+          ephemeral: true
+        });
         break;
       }
 
-      case 'emergency': {
-        const reason = interaction.options.getString('reason', true);
-        
-        // Create emergency meeting
-        const { data: meeting, error } = await supabase
+      case 'cancel': {
+        const meetingId = interaction.options.getString('meeting_id', true);
+
+        const { data: meeting, error: fetchError } = await supabase
           .from('meetings')
-          .insert({
-            faction_id: faction.id,
-            title: '🚨 Emergency Meeting',
-            description: reason,
-            scheduled_for: new Date().toISOString(),
-            created_by_user_id: interaction.user.id,
-            is_emergency: true,
-            notify_roles: faction.admin_role_id ? [faction.admin_role_id] : []
-          })
           .select()
+          .eq('id', meetingId)
+          .eq('faction_id', faction.id)
           .single();
 
-        if (error) throw error;
+        if (fetchError || !meeting) {
+          await interaction.reply({
+            content: 'Meeting not found or you do not have permission to cancel it.',
+            ephemeral: true
+          });
+          return;
+        }
 
-        const embed = new EmbedBuilder()
-          .setColor('#ff0000')
-          .setTitle('🚨 Emergency Meeting Called')
-          .setDescription(reason)
-          .addFields(
-            { name: 'Called By', value: interaction.user.tag },
-            { name: 'Status', value: '⚠️ Immediate attendance required' }
-          )
-          .setTimestamp();
+        // Delete meeting and attendance records
+        const { error: deleteError } = await supabase
+          .from('meetings')
+          .delete()
+          .eq('id', meetingId);
 
-        const mentions = ['@everyone'];
-        if (faction.admin_role_id) {
-          mentions.push(`<@&${faction.admin_role_id}>`);
+        if (deleteError) {
+          logger.error('Error canceling meeting:', deleteError);
+          await interaction.reply({
+            content: 'An error occurred while canceling the meeting.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        // Try to delete or update the announcement message
+        if (meeting.channel_id && meeting.message_id) {
+          try {
+            const channel = await interaction.guild?.channels.fetch(meeting.channel_id);
+            if (channel?.isTextBased()) {
+              const message = await channel.messages.fetch(meeting.message_id);
+              if (message) {
+                const canceledEmbed = new EmbedBuilder()
+                  .setColor('#ff0000')
+                  .setTitle('❌ CANCELED: ' + meeting.title)
+                  .setDescription(meeting.description || 'No description provided.')
+                  .addFields(
+                    { name: 'Was scheduled for', value: `<t:${Math.floor(new Date(meeting.scheduled_time).getTime() / 1000)}:F>`, inline: true },
+                    { name: 'Canceled by', value: `<@${interaction.user.id}>`, inline: true }
+                  )
+                  .setTimestamp();
+
+                await message.edit({
+                  content: '~~@everyone New meeting scheduled!~~ **CANCELED**',
+                  embeds: [canceledEmbed]
+                });
+              }
+            }
+          } catch (error) {
+            logger.error('Error updating canceled meeting message:', error);
+          }
         }
 
         await interaction.reply({
-          content: mentions.join(' '),
-          embeds: [embed]
+          content: 'Meeting has been canceled.',
+          ephemeral: true
         });
+        break;
+      }
 
-        // Send to meeting channel if configured
-        if (faction.meeting_channel_id) {
-          const channel = interaction.guild?.channels.cache.get(faction.meeting_channel_id);
-          if (channel?.isTextBased()) {
-            await channel.send({
-              content: mentions.join(' '),
-              embeds: [embed]
-            });
-          }
+      case 'attendance': {
+        const meetingId = interaction.options.getString('meeting_id', true);
+        const userId = interaction.options.getUser('user', true);
+        const status = interaction.options.getString('status', true) as MeetingAttendance['status'];
+
+        // Get target member
+        const { data: targetMember } = await supabase
+          .from('faction_members')
+          .select()
+          .eq('faction_id', faction.id)
+          .eq('discord_user_id', userId.id)
+          .single();
+
+        if (!targetMember) {
+          await interaction.reply({
+            content: 'The specified user is not a member of this faction.',
+            ephemeral: true
+          });
+          return;
         }
+
+        // Update or create attendance record
+        const { error } = await supabase
+          .from('meeting_attendance')
+          .upsert({
+            meeting_id: meetingId,
+            member_id: targetMember.id,
+            status
+          });
+
+        if (error) {
+          logger.error('Error updating attendance:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating attendance.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        const statusEmoji = {
+          PRESENT: '✅',
+          LATE: '⚠️',
+          ABSENT: '❌'
+        };
+
+        await interaction.reply({
+          content: `${statusEmoji[status]} Updated attendance for <@${userId.id}> to ${status}`,
+          ephemeral: true
+        });
         break;
       }
 
       default:
         await interaction.reply({
-          content: 'Invalid subcommand',
+          content: 'Unknown subcommand.',
           ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in meeting command:', error);
     await interaction.reply({
-      content: 'There was an error while managing the meeting. Please try again later.',
+      content: 'An error occurred while processing the meeting command.',
       ephemeral: true
     });
   }
 }
+
+module.exports = { handleMeeting };

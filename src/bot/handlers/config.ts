@@ -1,12 +1,28 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
 
+interface FactionMember {
+  id: string;
+  faction_id: string;
+  discord_user_id: string;
+  role: string;
+}
 
+interface Faction {
+  id: string;
+  name: string;
+  prefix: string;
+  timezone: string;
+  meeting_channel_id?: string;
+  voting_channel_id?: string;
+  announcement_channel_id?: string;
+}
 
+type ValidRole = 'LEADER' | 'OFFICER';
 
-
-export async function handleConfig(interaction: ChatInputCommandInteraction) {
+async function handleConfig(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
   try {
@@ -20,7 +36,7 @@ export async function handleConfig(interaction: ChatInputCommandInteraction) {
     if (!faction) {
       await interaction.reply({
         content: 'This server does not have a registered faction. Use `/register` first.',
-        flags: 64
+        ephemeral: true
       });
       return;
     }
@@ -33,10 +49,10 @@ export async function handleConfig(interaction: ChatInputCommandInteraction) {
       .eq('discord_user_id', interaction.user.id)
       .single();
 
-    if (!member || !['LEADER', 'OFFICER'].includes(member.role)) {
+    if (!member || !['LEADER', 'OFFICER'].includes(member.role as ValidRole)) {
       await interaction.reply({
         content: 'You do not have permission to modify faction settings.',
-        flags: 64
+        ephemeral: true
       });
       return;
     }
@@ -48,7 +64,7 @@ export async function handleConfig(interaction: ChatInputCommandInteraction) {
         if (prefix.length > 10) {
           await interaction.reply({
             content: 'Prefix must be 10 characters or less.',
-            flags: 64
+            ephemeral: true
           });
           return;
         }
@@ -58,86 +74,112 @@ export async function handleConfig(interaction: ChatInputCommandInteraction) {
           .update({ prefix })
           .eq('id', faction.id);
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error updating faction prefix:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating the prefix.',
+            ephemeral: true
+          });
+          return;
+        }
 
-        const embed = new EmbedBuilder()
-          .setColor('#00ff00')
-          .setTitle('Prefix Updated')
-          .setDescription(`Faction prefix has been set to: \`${prefix}\``)
-          .setTimestamp();
-
-        await interaction.reply({ embeds: [embed] });
-        break;
-      }
-
-      case 'admin': {
-        const role = interaction.options.getRole('role', true);
-        
-        const { error } = await supabase
-          .from('factions')
-          .update({ admin_role_id: role.id })
-          .eq('id', faction.id);
-
-        if (error) throw error;
-
-        const embed = new EmbedBuilder()
-          .setColor('#00ff00')
-          .setTitle('Admin Role Updated')
-          .setDescription(`Admin role has been set to: ${role.name}`)
-          .setTimestamp();
-
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({
+          content: `Faction prefix updated to: ${prefix}`,
+          ephemeral: true
+        });
         break;
       }
 
       case 'timezone': {
         const timezone = interaction.options.getString('timezone', true);
-        
+
+        // Validate timezone
         try {
-          // More reliable timezone validation
-          new Intl.DateTimeFormat('en-US', { timeZone: timezone });
+          Intl.DateTimeFormat(undefined, { timeZone: timezone });
         } catch (error) {
-          logger.error('Timezone validation error:', error);
           await interaction.reply({
-            content: `Invalid timezone "${timezone}". Please use a valid IANA timezone (e.g., "America/New_York").`,
-            flags: 64
+            content: 'Invalid timezone. Please use a valid IANA timezone identifier (e.g., America/New_York).',
+            ephemeral: true
           });
           return;
         }
-        
 
         const { error } = await supabase
           .from('factions')
           .update({ timezone })
           .eq('id', faction.id);
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error updating faction timezone:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating the timezone.',
+            ephemeral: true
+          });
+          return;
+        }
+
+        await interaction.reply({
+          content: `Faction timezone updated to: ${timezone}`,
+          ephemeral: true
+        });
+        break;
+      }
+
+      case 'channels': {
+        const meetingChannel = interaction.options.getChannel('meeting');
+        const votingChannel = interaction.options.getChannel('voting');
+        const announcementChannel = interaction.options.getChannel('announcements');
+
+        const updates: Partial<Faction> = {};
+        if (meetingChannel) updates.meeting_channel_id = meetingChannel.id;
+        if (votingChannel) updates.voting_channel_id = votingChannel.id;
+        if (announcementChannel) updates.announcement_channel_id = announcementChannel.id;
+
+        const { error } = await supabase
+          .from('factions')
+          .update(updates)
+          .eq('id', faction.id);
+
+        if (error) {
+          logger.error('Error updating faction channels:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating the channels.',
+            ephemeral: true
+          });
+          return;
+        }
 
         const embed = new EmbedBuilder()
           .setColor('#00ff00')
-          .setTitle('Timezone Updated')
-          .setDescription(`Faction timezone has been set to: \`${timezone}\``)
-          .addFields({
-            name: 'Current Time',
-            value: new Date().toLocaleString('en-US', { timeZone: timezone })
-          })
+          .setTitle('Channel Configuration Updated')
+          .setDescription('The following channels have been updated:')
+          .addFields(
+            meetingChannel ? { name: 'Meeting Channel', value: `<#${meetingChannel.id}>`, inline: true } : null,
+            votingChannel ? { name: 'Voting Channel', value: `<#${votingChannel.id}>`, inline: true } : null,
+            announcementChannel ? { name: 'Announcement Channel', value: `<#${announcementChannel.id}>`, inline: true } : null
+          )
           .setTimestamp();
 
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({
+          embeds: [embed],
+          ephemeral: true
+        });
         break;
       }
 
       default:
         await interaction.reply({
-          content: 'Invalid subcommand',
-          flags: 64
+          content: 'Unknown subcommand.',
+          ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in config command:', error);
     await interaction.reply({
-      content: 'There was an error while updating configuration. Please try again later.',
-      flags: 64
+      content: 'An error occurred while updating the configuration.',
+      ephemeral: true
     });
   }
 }
+
+module.exports = { handleConfig };

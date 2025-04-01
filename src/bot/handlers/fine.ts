@@ -1,8 +1,29 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction, User } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
 
-export async function handleFine(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  role: string;
+}
+
+interface Fine {
+  id: string;
+  faction_id: string;
+  user_id: string;
+  issuer_id: string;
+  amount: number;
+  reason: string;
+  created_at: string;
+  paid: boolean;
+}
+
+interface Faction {
+  id: string;
+  fine_log_channel_id: string;
+}
+
+async function handleFine(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
   try {
@@ -80,30 +101,38 @@ export async function handleFine(interaction: ChatInputCommandInteraction) {
           return;
         }
 
-        // Insert fine into database
+        // Create fine
         const { data: fine, error } = await supabase
           .from('fines')
           .insert({
             faction_id: faction.id,
-            issued_to_user_id: user.id,
-            issued_by_user_id: interaction.user.id,
+            user_id: user.id,
+            issuer_id: interaction.user.id,
             amount,
             reason,
+            paid: false
           })
           .select()
           .single();
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error creating fine:', error);
+          await interaction.reply({
+            content: 'An error occurred while issuing the fine.',
+            ephemeral: true
+          });
+          return;
+        }
 
         const embed = new EmbedBuilder()
           .setColor('#ff0000')
           .setTitle('💰 Fine Issued')
           .addFields(
-            { name: '👤 Member', value: user.tag, inline: true },
-            { name: '💵 Amount', value: `$${amount.toLocaleString()}`, inline: true },
-            { name: '📝 Reason', value: reason },
-            { name: '👮 Issued By', value: interaction.user.tag, inline: true },
-            { name: '🆔 Fine ID', value: fine.id, inline: true }
+            { name: 'User', value: `<@${fine.user_id}>`, inline: true },
+            { name: 'Amount', value: `$${fine.amount.toLocaleString()}`, inline: true },
+            { name: 'Reason', value: fine.reason },
+            { name: 'Issued By', value: `<@${fine.issuer_id}>`, inline: true },
+            { name: 'Status', value: 'Unpaid', inline: true }
           )
           .setTimestamp();
 
@@ -123,34 +152,42 @@ export async function handleFine(interaction: ChatInputCommandInteraction) {
       }
 
       case 'history': {
-        // Get all fines for the faction with user details
+        const user = interaction.options.getUser('user');
         const { data: fines } = await supabase
           .from('fines')
           .select()
           .eq('faction_id', faction.id)
+          .eq('user_id', user?.id || null)
           .order('created_at', { ascending: false })
           .limit(10);
 
+        if (!fines?.length) {
+          await interaction.reply({
+            content: user ? `No fines found for ${user.tag}.` : 'No fines found.',
+            ephemeral: true
+          });
+          return;
+        }
+
         const embed = new EmbedBuilder()
           .setColor('#0099ff')
-          .setTitle('📜 Recent Fines')
-          .setDescription(
-            fines && fines.length > 0
-              ? fines.map(fine => 
-                  `**ID:** ${fine.id}\n` +
-                  `**Member:** <@${fine.issued_to_user_id}>\n` +
-                  `**Amount:** $${fine.amount.toLocaleString()}\n` +
-                  `**Reason:** ${fine.reason}\n` +
-                  `**Status:** ${fine.paid ? '✅ Paid' : '❌ Unpaid'}\n` +
-                  `**Issued By:** <@${fine.issued_by_user_id}>\n` +
-                  `**Date:** <t:${Math.floor(new Date(fine.created_at).getTime() / 1000)}:R>`
-                ).join('\n\n---\n\n')
-              : 'No fines found.'
-          )
-          .setFooter({ text: 'Only showing the 10 most recent fines' })
-          .setTimestamp();
+          .setTitle('💰 Fine History')
+          .setDescription(user ? `Showing fines for ${user.tag}` : 'Showing recent fines');
 
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        for (const fine of fines) {
+          embed.addFields({
+            name: `Fine #${fine.id}`,
+            value: [
+              `**Amount:** $${fine.amount.toLocaleString()}`,
+              `**Reason:** ${fine.reason}`,
+              `**Status:** ${fine.paid ? '✅ Paid' : '❌ Unpaid'}`,
+              `**Issued By:** <@${fine.issuer_id}>`,
+              `**Date:** <t:${Math.floor(new Date(fine.created_at).getTime() / 1000)}:R>`
+            ].join('\n')
+          });
+        }
+
+        await interaction.reply({ embeds: [embed] });
         break;
       }
 
@@ -174,7 +211,7 @@ export async function handleFine(interaction: ChatInputCommandInteraction) {
         }
 
         // Only allow removing fines issued by self unless leader
-        if (member.role !== 'LEADER' && fine.issued_by_user_id !== interaction.user.id) {
+        if (member.role !== 'LEADER' && fine.issuer_id !== interaction.user.id) {
           await interaction.reply({
             content: 'You can only remove fines that you issued.',
             ephemeral: true
@@ -188,16 +225,23 @@ export async function handleFine(interaction: ChatInputCommandInteraction) {
           .eq('id', fineId)
           .eq('faction_id', faction.id);
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error removing fine:', error);
+          await interaction.reply({
+            content: 'An error occurred while removing the fine.',
+            ephemeral: true
+          });
+          return;
+        }
 
         const embed = new EmbedBuilder()
           .setColor('#00ff00')
           .setTitle('✅ Fine Removed')
-          .setDescription(`Fine ${fineId} has been removed.`)
+          .setDescription(`Fine #${fineId} has been removed.`)
           .addFields(
             { name: 'Removed By', value: interaction.user.tag },
             { name: 'Original Amount', value: `$${fine.amount.toLocaleString()}` },
-            { name: 'Member', value: `<@${fine.issued_to_user_id}>` }
+            { name: 'Member', value: `<@${fine.user_id}>` }
           )
           .setTimestamp();
 
@@ -215,15 +259,17 @@ export async function handleFine(interaction: ChatInputCommandInteraction) {
 
       default:
         await interaction.reply({
-          content: 'Invalid subcommand',
+          content: 'Unknown subcommand.',
           ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in fine command:', error);
     await interaction.reply({
-      content: 'There was an error while managing fines. Please try again later.',
+      content: 'An error occurred while processing your command.',
       ephemeral: true
     });
   }
 }
+
+module.exports = { handleFine };

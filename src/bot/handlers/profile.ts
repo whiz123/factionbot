@@ -1,8 +1,33 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
 
-export async function handleProfile(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  id: string;
+  faction_id: string;
+  discord_user_id: string;
+  role: string;
+  joined_at: string;
+  contact_info?: {
+    discord?: string;
+    email?: string;
+    phone?: string;
+  };
+}
+
+interface Faction {
+  id: string;
+  name: string;
+  prefix: string;
+  timezone: string;
+}
+
+interface MeetingAttendance {
+  status: string;
+}
+
+async function handleProfile(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
   try {
@@ -43,47 +68,51 @@ export async function handleProfile(interaction: ChatInputCommandInteraction) {
         const { count: fineCount } = await supabase
           .from('fines')
           .select('*', { count: 'exact', head: true })
-          .eq('issued_to_user_id', interaction.user.id)
+          .eq('user_id', interaction.user.id)
           .eq('faction_id', faction.id);
 
         const { data: meetingAttendance } = await supabase
           .from('meeting_attendance')
           .select('status')
-          .eq('discord_user_id', interaction.user.id)
-          .in('status', ['ATTENDING', 'DECLINED', 'MAYBE']);
+          .eq('member_id', member.id);
 
-        const attendanceStats = meetingAttendance?.reduce((acc: Record<string, number>, curr) => {
+        const attendanceStats = meetingAttendance?.reduce((acc: Record<string, number>, curr: MeetingAttendance) => {
           acc[curr.status] = (acc[curr.status] || 0) + 1;
           return acc;
-        }, {});
+        }, {}) || {};
 
         const embed = new EmbedBuilder()
           .setColor('#0099ff')
-          .setTitle('👤 Member Profile')
+          .setTitle(`${faction.name} Member Profile`)
+          .setDescription(`Profile for <@${interaction.user.id}>`)
           .addFields(
-            { 
-              name: '📋 Basic Information',
-              value: [
-                `**Role:** ${member.role}`,
-                `**Joined:** <t:${Math.floor(new Date(member.joined_at).getTime() / 1000)}:R>`,
-                `**Phone:** ${member.phone || 'Not set'}`,
-                `**Twitter:** ${member.twitter || 'Not set'}`
-              ].join('\n')
-            },
+            { name: 'Role', value: member.role, inline: true },
+            { name: 'Member Since', value: `<t:${Math.floor(new Date(member.joined_at).getTime() / 1000)}:R>`, inline: true },
+            { name: 'Fines', value: `${fineCount || 0} received`, inline: true },
             {
-              name: '📊 Statistics',
+              name: 'Meeting Attendance',
               value: [
-                `**Fines Received:** ${fineCount || 0}`,
-                `**Meetings Attended:** ${attendanceStats?.ATTENDING || 0}`,
-                `**Meetings Declined:** ${attendanceStats?.DECLINED || 0}`,
-                `**Maybe Responses:** ${attendanceStats?.MAYBE || 0}`
-              ].join('\n')
+                `✅ Present: ${attendanceStats.PRESENT || 0}`,
+                `⚠️ Late: ${attendanceStats.LATE || 0}`,
+                `❌ Absent: ${attendanceStats.ABSENT || 0}`
+              ].join('\n'),
+              inline: true
             }
-          )
-          .setTimestamp();
+          );
 
-        if (member.profile_photo_url) {
-          embed.setThumbnail(member.profile_photo_url);
+        if (member.contact_info) {
+          const contactFields = [];
+          if (member.contact_info.discord) contactFields.push(`Discord: ${member.contact_info.discord}`);
+          if (member.contact_info.email) contactFields.push(`Email: ${member.contact_info.email}`);
+          if (member.contact_info.phone) contactFields.push(`Phone: ${member.contact_info.phone}`);
+
+          if (contactFields.length > 0) {
+            embed.addFields({
+              name: 'Contact Information',
+              value: contactFields.join('\n'),
+              inline: false
+            });
+          }
         }
 
         await interaction.reply({ embeds: [embed], ephemeral: true });
@@ -91,68 +120,50 @@ export async function handleProfile(interaction: ChatInputCommandInteraction) {
       }
 
       case 'edit': {
+        const discord = interaction.options.getString('discord');
+        const email = interaction.options.getString('email');
         const phone = interaction.options.getString('phone');
-        const twitter = interaction.options.getString('twitter');
-
-        // Validate phone format if provided
-        if (phone && !/^\+?[\d\s-()]{10,}$/.test(phone)) {
-          await interaction.reply({
-            content: 'Invalid phone number format.',
-            ephemeral: true
-          });
-          return;
-        }
-
-        // Validate Twitter handle if provided
-        if (twitter && !/^@?[a-zA-Z0-9_]{1,15}$/.test(twitter)) {
-          await interaction.reply({
-            content: 'Invalid Twitter handle format.',
-            ephemeral: true
-          });
-          return;
-        }
-
-        const updates: Record<string, string> = {};
-        if (phone) updates.phone = phone;
-        if (twitter) updates.twitter = twitter.startsWith('@') ? twitter : `@${twitter}`;
 
         const { error } = await supabase
           .from('faction_members')
-          .update(updates)
+          .update({
+            contact_info: {
+              discord: discord || member.contact_info?.discord,
+              email: email || member.contact_info?.email,
+              phone: phone || member.contact_info?.phone
+            }
+          })
           .eq('id', member.id);
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error updating profile:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating your profile.',
+            ephemeral: true
+          });
+          return;
+        }
 
-        const embed = new EmbedBuilder()
-          .setColor('#00ff00')
-          .setTitle('✅ Profile Updated')
-          .setDescription('Your profile has been updated successfully.')
-          .addFields(
-            { 
-              name: 'Updated Information',
-              value: [
-                phone ? `**Phone:** ${phone}` : null,
-                twitter ? `**Twitter:** ${updates.twitter}` : null
-              ].filter(Boolean).join('\n') || 'No changes made'
-            }
-          )
-          .setTimestamp();
-
-        await interaction.reply({ embeds: [embed], ephemeral: true });
+        await interaction.reply({
+          content: 'Your profile has been updated successfully.',
+          ephemeral: true
+        });
         break;
       }
 
       default:
         await interaction.reply({
-          content: 'Invalid subcommand',
+          content: 'Unknown subcommand.',
           ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in profile command:', error);
     await interaction.reply({
-      content: 'There was an error while managing your profile. Please try again later.',
+      content: 'An error occurred while processing your command.',
       ephemeral: true
     });
   }
 }
+
+module.exports = { handleProfile };

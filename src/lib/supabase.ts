@@ -1,5 +1,5 @@
-import { createClient } from '@supabase/supabase-js';
-import { config } from 'dotenv';
+const { createClient } = require('@supabase/supabase-js');
+const { config } = require('dotenv');
 
 config();
 
@@ -10,9 +10,11 @@ if (!supabaseUrl || !supabaseKey) {
   throw new Error('Missing Supabase credentials');
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey, {
+const supabase = createClient(supabaseUrl, supabaseKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: false
   }
 });
+
+module.exports = { supabase };

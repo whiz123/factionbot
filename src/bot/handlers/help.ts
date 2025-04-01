@@ -1,8 +1,16 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
 
-const commands = {
+interface CommandCategory {
+  name: string;
+  description: string;
+}
+
+type CommandCategories = Record<string, CommandCategory[]>;
+
+const commands: CommandCategories = {
   basic: [
     { name: 'help', description: 'Show available commands' },
     { name: 'ping', description: 'Check if the bot is alive' },
@@ -35,7 +43,11 @@ const commands = {
   ]
 };
 
-export async function handleHelp(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  role: string;
+}
+
+async function handleHelp(interaction: ChatInputCommandInteraction): Promise<void> {
   try {
     // Get faction info to customize help based on user's role
     const { data: faction } = await supabase
@@ -45,7 +57,7 @@ export async function handleHelp(interaction: ChatInputCommandInteraction) {
       .single();
 
     // Get member info if faction exists
-    let member;
+    let member: FactionMember | null = null;
     if (faction) {
       const { data } = await supabase
         .from('faction_members')
@@ -140,7 +152,7 @@ export async function handleHelp(interaction: ChatInputCommandInteraction) {
     }
 
     await interaction.reply({ embeds: [embed], ephemeral: true });
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in help command:', error);
     await interaction.reply({
       content: 'There was an error while showing help information. Please try again later.',
@@ -148,3 +160,5 @@ export async function handleHelp(interaction: ChatInputCommandInteraction) {
     });
   }
 }
+
+module.exports = { handleHelp };

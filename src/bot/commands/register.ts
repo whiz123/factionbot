@@ -1,41 +1,64 @@
-import { REST, Routes } from 'discord.js';
-import { config } from 'dotenv';
-import { commands } from './index.js';
-import logger from '../lib/logger.js';
+import type { RESTPostAPIApplicationCommandsJSONBody } from 'discord.js';
+const { REST, Routes } = require('discord.js');
+const { config } = require('dotenv');
+const { commands } = require('./index');
+const logger = require('../lib/logger');
 
 config();
 
-const token = process.env.DISCORD_TOKEN;
-const clientId = process.env.CLIENT_ID;
+const token = process.env.DISCORD_TOKEN as string;
+const clientId = process.env.CLIENT_ID as string;
 
 if (!token || !clientId) {
-  logger.error('Missing required environment variables (DISCORD_TOKEN, CLIENT_ID)');
+  logger.error('Missing required environment variables');
   process.exit(1);
 }
 
-const rest = new REST({ version: '10' }).setToken(token);
+const rest = new REST().setToken(token);
 
-export async function registerCommands() {
+interface CommandDefinition {
+  name: string;
+  description: string;
+}
+
+// Convert command definitions to Discord.js slash command format
+const slashCommands: RESTPostAPIApplicationCommandsJSONBody[] = Object.values(commands)
+  .flat()
+  .map((cmd) => {
+    const command = cmd as CommandDefinition;
+    return {
+      name: command.name.split(' ')[0],
+      description: command.description,
+      options: command.name.includes(' ') ? [{
+        name: command.name.split(' ')[1],
+        description: 'Subcommand',
+        type: 1
+      }] : []
+    };
+  });
+
+async function registerCommands(): Promise<void> {
   try {
     logger.info('Started refreshing application (/) commands.');
 
-    const data = await rest.put(
-      Routes.applicationCommands(clientId!),
-      { body: commands }
+    await rest.put(
+      Routes.applicationCommands(clientId),
+      { body: slashCommands }
     );
 
-    logger.info(`Successfully reloaded ${Array.isArray(data) ? data.length : 0} application (/) commands.`);
-    return data;
-  } catch (error) {
-    logger.error('Error registering commands:', error);
+    logger.info('Successfully reloaded application (/) commands.');
+  } catch (error: unknown) {
+    logger.error('Error refreshing commands:', error);
     throw error;
   }
 }
 
 // Only run if this file is being executed directly
-if (import.meta.url === new URL(import.meta.url).href) {
+if (require.main === module) {
   registerCommands().catch((error) => {
     logger.error('Failed to register commands:', error);
     process.exit(1);
   });
 }
+
+module.exports = { registerCommands };

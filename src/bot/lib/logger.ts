@@ -1,43 +1,32 @@
-import winston from 'winston';
-import { join } from 'path';
-import { mkdir } from 'fs/promises';
+import type { Logger } from 'winston';
+const winston = require('winston');
+const { join } = require('path');
+const { mkdir } = require('fs/promises');
 
-// Ensure logs directory exists
-async function ensureLogsDir() {
-  try {
-    await mkdir('logs', { recursive: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-      console.error('Error creating logs directory:', error);
-    }
-  }
-}
+const logDir = join(process.cwd(), 'logs');
 
-// Create logger after ensuring directory exists
-await ensureLogsDir();
+// Create logs directory if it doesn't exist
+mkdir(logDir, { recursive: true }).catch((error: Error) => console.error(error));
 
-const logFormat = winston.format.combine(
-  winston.format.timestamp(),
-  winston.format.errors({ stack: true }),
-  winston.format.colorize(),
-  winston.format.simple(),
-  winston.format.printf(({ level, message, timestamp, stack }) => {
-    if (stack) {
-      return `${timestamp} ${level}: ${message}\n${stack}`;
-    }
-    return `${timestamp} ${level}: ${message}`;
-  })
-);
-
-const logger = winston.createLogger({
-  level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
-  format: logFormat,
-  defaultMeta: { service: 'discord-bot' },
+const logger: Logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
   transports: [
-    new winston.transports.Console(),
-    new winston.transports.File({ filename: join('logs', 'combined.log') }),
-    new winston.transports.File({ filename: join('logs', 'error.log') }) as winston.transports.FileTransportInstance // ✅ Fix
+    new winston.transports.File({ filename: join(logDir, 'error.log'), level: 'error' }),
+    new winston.transports.File({ filename: join(logDir, 'combined.log') })
   ]
 });
 
-export default logger;
+if (process.env.NODE_ENV !== 'production') {
+  logger.add(new winston.transports.Console({
+    format: winston.format.combine(
+      winston.format.colorize(),
+      winston.format.simple()
+    )
+  }));
+}
+
+module.exports = logger;

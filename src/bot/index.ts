@@ -1,15 +1,21 @@
-import { Client, Events, GatewayIntentBits } from 'discord.js';
-import { config } from 'dotenv';
-import { registerCommands } from './commands/register.js';
-import { handleCommands } from './handlers/commandHandler.js';
-import logger from './lib/logger.js';
-
+import type { Interaction } from 'discord.js';
+const { Client, Events, GatewayIntentBits } = require('discord.js');
+const { config } = require('dotenv');
+const { registerCommands } = require('./commands/register.js');
+const { handleCommands } = require('./handlers/commandHandler.js');
+const logger = require('./lib/logger.js');
 
 // Load environment variables
 config();
 
 // Validate required environment variables
-const requiredEnvVars = ['DISCORD_TOKEN', 'CLIENT_ID', 'SUPABASE_URL', 'SUPABASE_ANON_KEY'];
+const token = process.env.DISCORD_TOKEN as string;
+if (!token) {
+  logger.error('Missing Discord token');
+  process.exit(1);
+}
+
+const requiredEnvVars = ['CLIENT_ID', 'SUPABASE_URL', 'SUPABASE_ANON_KEY'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
@@ -19,48 +25,49 @@ if (missingEnvVars.length > 0) {
 
 // Configure client
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildPresences,
-    GatewayIntentBits.GuildMessageReactions,
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 // Event handlers
-client.once(Events.ClientReady, async (c) => {
-  logger.info(`Ready! Logged in as ${c.user.tag}`);
-  
-  // Register commands on startup
+client.once(Events.ClientReady, () => {
+  logger.info(`Logged in as ${client.user?.tag}`);
+});
+
+client.on('error', (error: Error) => {
+  logger.error('Client error:', error);
+});
+
+client.on(Events.InteractionCreate, async (interaction: Interaction) => {
+  if (!interaction.isChatInputCommand()) return;
   try {
-    const data = await registerCommands();
-    logger.info(`Successfully registered ${Array.isArray(data) ? data.length : 0} commands`);
-  } catch (error) {
-    logger.error('Failed to register commands:', error);
-    process.exit(1); // Exit if we can't register commands
+    await handleCommands(interaction);
+  } catch (error: unknown) {
+    logger.error('Error handling command:', error);
+    await interaction.reply({ 
+      content: 'An error occurred while processing your command.', 
+      ephemeral: true 
+    }).catch(() => {});
   }
 });
 
-client.on(Events.InteractionCreate, handleCommands);
-
 // Error handling
-client.on(Events.Error, error => {
-  logger.error('Discord client error:', error);
-});
-
-process.on('unhandledRejection', (error) => {
+process.on('unhandledRejection', (error: unknown) => {
   logger.error('Unhandled promise rejection:', error);
 });
 
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', (error: Error) => {
   logger.error('Uncaught exception:', error);
   process.exit(1);
 });
 
-// Start the bot
-client.login(process.env.DISCORD_TOKEN).catch(error => {
-  logger.error('Failed to login:', error);
-  process.exit(1);
-});
+async function start(): Promise<void> {
+  try {
+    await registerCommands();
+    await client.login(token);
+  } catch (error: unknown) {
+    logger.error('Failed to start bot:', error);
+    process.exit(1);
+  }
+}
+
+start();

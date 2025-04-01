@@ -1,22 +1,23 @@
-import { ChatInputCommandInteraction } from 'discord.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
 
-export interface CommandContext {
+export type CommandContext = {
   interaction: ChatInputCommandInteraction;
   guildId: string;
   userId: string;
-}
+};
 
-export interface CommandHandler {
+export type CommandHandler = {
+  name: string;
+  description: string;
   execute: (context: CommandContext) => Promise<void>;
-  cooldown?: number; // Cooldown in seconds
-}
+  cooldown?: number;
+};
 
-export interface Faction {
+export type Faction = {
   id: string;
   name: string;
   discord_guild_id: string;
-  prefix: string;
-  timezone: string;
+  created_at: string;
   admin_role_id?: string;
   fine_role_id?: string;
-}
+};

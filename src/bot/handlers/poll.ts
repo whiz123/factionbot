@@ -1,9 +1,30 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
-import { addMinutes } from 'date-fns';
+import type { ChatInputCommandInteraction, Message } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
+const { addMinutes } = require('date-fns');
 
-export async function handlePoll(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  id: string;
+  faction_id: string;
+  discord_user_id: string;
+  role: string;
+}
+
+interface Faction {
+  id: string;
+  voting_channel_id: string;
+}
+
+interface PollOption {
+  emoji: string;
+  text: string;
+  votes: number;
+}
+
+const EMOJI_LIST = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+async function handlePoll(interaction: ChatInputCommandInteraction): Promise<void> {
   try {
     // Get faction info
     const { data: faction } = await supabase
@@ -49,113 +70,147 @@ export async function handlePoll(interaction: ChatInputCommandInteraction) {
       return;
     }
 
-    const endsAt = addMinutes(new Date(), duration);
+    // Create poll options with emojis
+    const pollOptions: PollOption[] = options.map((text, index) => ({
+      emoji: EMOJI_LIST[index],
+      text,
+      votes: 0
+    }));
 
-    // Create poll in database
+    const endTime = addMinutes(new Date(), duration);
+
+    const embed = new EmbedBuilder()
+      .setColor('#0099ff')
+      .setTitle('📊 ' + question)
+      .setDescription(
+        pollOptions
+          .map(opt => `${opt.emoji} ${opt.text}`)
+          .join('\n\n') +
+        `\n\nPoll ends: <t:${Math.floor(endTime.getTime() / 1000)}:R>`
+      )
+      .setFooter({
+        text: `Created by ${interaction.user.tag} • React with the emojis to vote!`
+      });
+
+    // Create the poll in the database
     const { data: poll, error } = await supabase
       .from('polls')
       .insert({
         faction_id: faction.id,
+        creator_id: interaction.user.id,
         question,
-        options,
-        created_by_user_id: interaction.user.id,
-        ends_at: endsAt.toISOString()
+        options: pollOptions,
+        end_time: endTime.toISOString()
       })
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      logger.error('Error creating poll:', error);
+      await interaction.reply({
+        content: 'An error occurred while creating the poll.',
+        ephemeral: true
+      });
+      return;
+    }
 
-    const reactions = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-    const pollOptions = options.map((opt, i) => `${reactions[i]} ${opt}`).join('\n');
-
-    const embed = new EmbedBuilder()
-      .setColor('#0099ff')
-      .setTitle(`📊 Poll: ${question}`)
-      .setDescription(pollOptions)
-      .addFields(
-        { name: 'Created By', value: interaction.user.tag, inline: true },
-        { name: 'Ends', value: `<t:${Math.floor(endsAt.getTime() / 1000)}:R>`, inline: true },
-        { name: 'Poll ID', value: poll.id, inline: true }
-      )
-      .setFooter({ text: 'React with the corresponding number to vote!' })
-      .setTimestamp();
-
+    // Send poll message
     const message = await interaction.reply({
       embeds: [embed],
       fetchReply: true
-    });
+    }) as Message;
 
     // Add reaction options
-    for (let i = 0; i < options.length; i++) {
-      await message.react(reactions[i]);
+    for (const option of pollOptions) {
+      await message.react(option.emoji);
     }
 
-    // Set up collector for votes
-    const filter = (reaction: any) => reactions.slice(0, options.length).includes(reaction.emoji.name);
-    const collector = message.createReactionCollector({ 
-      filter, 
-      time: duration * 60 * 1000 
+    // Create collector for reactions
+    const filter = (_: unknown, user: { id: string }) => user.id !== interaction.client.user?.id;
+    const collector = message.createReactionCollector({
+      filter,
+      time: duration * 60 * 1000
     });
 
+    // Track votes
+    const votes = new Map<string, string>();
+
     collector.on('collect', async (reaction, user) => {
-      if (user.bot) return;
+      const emoji = reaction.emoji.name;
+      if (!emoji || !EMOJI_LIST.includes(emoji)) return;
 
-      const optionIndex = reactions.indexOf(reaction.emoji.name!);
-
-      try {
-        // Record vote in database
-        await supabase
-          .from('poll_votes')
-          .upsert({
-            poll_id: poll.id,
-            discord_user_id: user.id,
-            option_index: optionIndex
-          });
-      } catch (error) {
-        logger.error('Error recording poll vote:', error);
+      // Remove other reactions from this user
+      const previousVote = votes.get(user.id);
+      if (previousVote && previousVote !== emoji) {
+        const previousReaction = message.reactions.cache.find(r => r.emoji.name === previousVote);
+        await previousReaction?.users.remove(user.id);
       }
+
+      votes.set(user.id, emoji);
+
+      // Update vote counts
+      const updatedOptions = pollOptions.map(opt => ({
+        ...opt,
+        votes: message.reactions.cache.get(opt.emoji)?.count ?? 0
+      }));
+
+      // Update poll in database
+      await supabase
+        .from('polls')
+        .update({
+          options: updatedOptions,
+          votes: Object.fromEntries(votes)
+        })
+        .eq('id', poll.id);
     });
 
     collector.on('end', async () => {
-      try {
-        // Get final vote counts
-        const { data: votes } = await supabase
-          .from('poll_votes')
-          .select('option_index')
-          .eq('poll_id', poll.id);
+      const finalOptions = pollOptions.map(opt => ({
+        ...opt,
+        votes: message.reactions.cache.get(opt.emoji)?.count ?? 0
+      }));
 
-        const voteCounts = options.map((_, i) => 
-          votes?.filter(v => v.option_index === i).length ?? 0
-        );
+      const totalVotes = finalOptions.reduce((sum, opt) => sum + opt.votes, 0);
+      const winner = finalOptions.reduce((prev, curr) => 
+        curr.votes > prev.votes ? curr : prev
+      );
 
-        const totalVotes = voteCounts.reduce((a, b) => a + b, 0);
-        const results = options.map((opt, i) => {
-          const count = voteCounts[i];
-          const percentage = totalVotes > 0 ? (count / totalVotes * 100).toFixed(1) : '0.0';
-          return `${reactions[i]} ${opt}\n└ ${count} votes (${percentage}%)`;
-        }).join('\n\n');
+      const resultsEmbed = new EmbedBuilder()
+        .setColor('#00ff00')
+        .setTitle('📊 Poll Results: ' + question)
+        .setDescription(
+          finalOptions
+            .map(opt => 
+              `${opt.emoji} ${opt.text}\n` +
+              `Votes: ${opt.votes} (${Math.round((opt.votes / totalVotes) * 100)}%)`
+            )
+            .join('\n\n') +
+          `\n\n**Winner:** ${winner.text} with ${winner.votes} votes!`
+        )
+        .setFooter({
+          text: `Poll ended • Total votes: ${totalVotes}`
+        });
 
-        const resultsEmbed = new EmbedBuilder()
-          .setColor('#00ff00')
-          .setTitle(`📊 Poll Results: ${question}`)
-          .setDescription(results)
-          .addFields(
-            { name: 'Total Votes', value: totalVotes.toString(), inline: true },
-            { name: 'Status', value: '✅ Closed', inline: true }
-          )
-          .setTimestamp();
+      await message.edit({ embeds: [resultsEmbed] });
+      await message.reactions.removeAll();
 
-        await message.reply({ embeds: [resultsEmbed] });
-      } catch (error) {
-        logger.error('Error handling poll end:', error);
-      }
+      // Update final results in database
+      await supabase
+        .from('polls')
+        .update({
+          options: finalOptions,
+          ended: true,
+          winner: winner.text
+        })
+        .eq('id', poll.id);
     });
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in poll command:', error);
     await interaction.reply({
-      content: 'There was an error while creating the poll. Please try again later.',
+      content: 'An error occurred while creating the poll.',
       ephemeral: true
     });
   }
 }
+
+module.exports = { handlePoll };

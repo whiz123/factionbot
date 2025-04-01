@@ -1,8 +1,26 @@
-import { ChatInputCommandInteraction, EmbedBuilder } from 'discord.js';
-import { supabase } from '../lib/supabase.js';
-import logger from '../lib/logger.js';
+import type { ChatInputCommandInteraction } from 'discord.js';
+const { EmbedBuilder } = require('discord.js');
+const { supabase } = require('../lib/supabase');
+const logger = require('../lib/logger');
 
-export async function handleRadio(interaction: ChatInputCommandInteraction) {
+interface FactionMember {
+  id: string;
+  faction_id: string;
+  discord_user_id: string;
+  role: string;
+}
+
+interface Faction {
+  id: string;
+  name: string;
+  radio_frequency?: string;
+  radio_updated_at?: string;
+  radio_updated_by?: string;
+}
+
+type ValidRole = 'LEADER' | 'OFFICER';
+
+async function handleRadio(interaction: ChatInputCommandInteraction): Promise<void> {
   const subcommand = interaction.options.getSubcommand();
 
   try {
@@ -39,7 +57,7 @@ export async function handleRadio(interaction: ChatInputCommandInteraction) {
 
     switch (subcommand) {
       case 'set': {
-        if (!['LEADER', 'OFFICER'].includes(member.role)) {
+        if (!['LEADER', 'OFFICER'].includes(member.role as ValidRole)) {
           await interaction.reply({
             content: 'Only leaders and officers can modify radio settings.',
             ephemeral: true
@@ -59,45 +77,44 @@ export async function handleRadio(interaction: ChatInputCommandInteraction) {
         }
 
         const { error } = await supabase
-          .from('radio_settings')
-          .upsert({
-            faction_id: faction.id,
-            frequency,
-            format: 'FM'
-          });
+          .from('factions')
+          .update({
+            radio_frequency: frequency,
+            radio_updated_at: new Date().toISOString(),
+            radio_updated_by: interaction.user.id
+          })
+          .eq('id', faction.id);
 
-        if (error) throw error;
+        if (error) {
+          logger.error('Error updating radio frequency:', error);
+          await interaction.reply({
+            content: 'An error occurred while updating the radio frequency.',
+            ephemeral: true
+          });
+          return;
+        }
 
         const embed = new EmbedBuilder()
           .setColor('#00ff00')
           .setTitle('📻 Radio Frequency Updated')
-          .setDescription(`Frequency set to: ${frequency} FM`)
+          .setDescription(`New frequency: ${frequency}`)
+          .addFields(
+            { name: 'Updated by', value: `<@${interaction.user.id}>`, inline: true },
+            { name: 'Updated at', value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+          )
           .setTimestamp();
 
-        if (faction.radio_channel_id) {
-          const channel = interaction.guild?.channels.cache.get(faction.radio_channel_id);
-          if (channel?.isTextBased()) {
-            await channel.send({ embeds: [embed] });
-          }
-        }
-
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({
+          embeds: [embed],
+          ephemeral: true
+        });
         break;
       }
 
-      case 'announce': {
-        const message = interaction.options.getString('message', true);
-        
-        // Get radio settings
-        const { data: radioSettings } = await supabase
-          .from('radio_settings')
-          .select()
-          .eq('faction_id', faction.id)
-          .single();
-
-        if (!radioSettings) {
+      case 'view': {
+        if (!faction.radio_frequency) {
           await interaction.reply({
-            content: 'Radio frequency has not been set. Ask a leader or officer to set it first.',
+            content: 'No radio frequency has been set for this faction.',
             ephemeral: true
           });
           return;
@@ -105,36 +122,36 @@ export async function handleRadio(interaction: ChatInputCommandInteraction) {
 
         const embed = new EmbedBuilder()
           .setColor('#0099ff')
-          .setTitle('📻 Radio Announcement')
-          .setDescription(message)
+          .setTitle('📻 Radio Information')
+          .setDescription(`Current frequency: ${faction.radio_frequency}`)
           .addFields(
-            { name: 'Frequency', value: `${radioSettings.frequency} ${radioSettings.format}`, inline: true },
-            { name: 'From', value: interaction.user.tag, inline: true }
+            faction.radio_updated_by ? 
+              { name: 'Last updated by', value: `<@${faction.radio_updated_by}>`, inline: true } : null,
+            faction.radio_updated_at ? 
+              { name: 'Last updated', value: `<t:${Math.floor(new Date(faction.radio_updated_at).getTime() / 1000)}:R>`, inline: true } : null
           )
           .setTimestamp();
 
-        if (faction.radio_channel_id) {
-          const channel = interaction.guild?.channels.cache.get(faction.radio_channel_id);
-          if (channel?.isTextBased()) {
-            await channel.send({ embeds: [embed] });
-          }
-        }
-
-        await interaction.reply({ embeds: [embed] });
+        await interaction.reply({
+          embeds: [embed],
+          ephemeral: true
+        });
         break;
       }
 
       default:
         await interaction.reply({
-          content: 'Invalid subcommand',
+          content: 'Unknown subcommand.',
           ephemeral: true
         });
     }
-  } catch (error) {
+  } catch (error: unknown) {
     logger.error('Error in radio command:', error);
     await interaction.reply({
-      content: 'There was an error while managing radio settings. Please try again later.',
+      content: 'An error occurred while processing the radio command.',
       ephemeral: true
     });
   }
 }
+
+module.exports = { handleRadio };
